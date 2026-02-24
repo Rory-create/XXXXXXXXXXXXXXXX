@@ -1,0 +1,18 @@
+# Credentials — never commit these
+credentials.json
+token.json
+
+# Archive output
+archive_output/
+archive_run.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
