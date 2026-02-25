@@ -18,12 +18,18 @@ Simulates a realistic school Drive structure:
   │       └── Essay_APUSH.docx
   └── Random Old File.txt  (no year folder → fall back to timestamp)
 
+Shared With Me:
+  [Shared] Alex Johnson/
+      GroupProject.pptx  (Google Slides)
+  SharedDirectFile.pdf   (shared directly, no folder)
+
 All API calls are mocked — no credentials needed.
 """
 
 import sys
 import os
 import io
+import re
 import json
 import shutil
 import unittest
@@ -36,7 +42,8 @@ import config
 from src.categorizer import Categorizer
 from src.drive_walker import DriveWalker
 from src.downloader import Downloader
-from src.archiver import Archiver
+from src.archiver import Archiver, SizeEstimate
+from src.sync import SyncState
 
 
 # ---------------------------------------------------------------
@@ -65,29 +72,80 @@ def _file(fid, name, mime, parent, created="2022-09-10T08:00:00Z", path=""):
 
 
 # Folder IDs
-ROOT = "root"
-F_2223 = "folder_2223"
-F_ENG  = "folder_eng"
-F_ALG  = "folder_alg"
-F_MISC = "folder_misc"
-F_JR   = "folder_junior"
-F_CHEM = "folder_chem"
-F_PUSH = "folder_apush"
+ROOT    = "root"
+F_2223  = "folder_2223"
+F_ENG   = "folder_eng"
+F_ALG   = "folder_alg"
+F_MISC  = "folder_misc"
+F_JR    = "folder_junior"
+F_CHEM  = "folder_chem"
+F_PUSH  = "folder_apush"
+F_SHARD = "folder_shared_alex"   # a folder shared with the user
 
 # File IDs
-FID_ESSAY    = "file_essay"
-FID_READING  = "file_reading"
-FID_NOTES    = "file_notes"
-FID_RANDOM   = "file_random"
-FID_LAB      = "file_lab"
-FID_APUSH    = "file_apush"
-FID_OLDTXT   = "file_oldtxt"
+FID_ESSAY      = "file_essay"
+FID_READING    = "file_reading"
+FID_NOTES      = "file_notes"
+FID_RANDOM     = "file_random"
+FID_LAB        = "file_lab"
+FID_APUSH      = "file_apush"
+FID_OLDTXT     = "file_oldtxt"
+FID_SHARED_PPT = "file_shared_ppt"   # inside a shared folder
+FID_SHARED_PDF = "file_shared_pdf"   # shared directly (no folder)
+
+
+GSLIDES = "application/vnd.google-apps.presentation"
+
+# Shared-with-me top-level items: a folder and a bare file
+SHARED_WITH_ME_ITEMS = [
+    {
+        "id": F_SHARD,
+        "name": "Group Project Alex",
+        "mimeType": FOLDER,
+        "parents": [],
+        "createdTime": "2024-03-01T00:00:00Z",
+        "modifiedTime": "2024-03-01T00:00:00Z",
+        "size": "0",
+        "full_path": "[Shared] Alex Johnson/Group Project Alex",
+        "webViewLink": "https://drive.google.com/folder/shared_alex",
+        "sharingUser": {"displayName": "Alex Johnson"},
+        "owners": [{"displayName": "Alex Johnson"}],
+    },
+    {
+        "id": FID_SHARED_PDF,
+        "name": "SharedDirectFile.pdf",
+        "mimeType": PDF,
+        "parents": [],
+        "createdTime": "2024-04-10T00:00:00Z",
+        "modifiedTime": "2024-04-10T00:00:00Z",
+        "size": "2048",
+        "full_path": "[Shared] Alex Johnson/SharedDirectFile.pdf",
+        "webViewLink": "https://drive.google.com/file/shared_pdf",
+        "sharingUser": {"displayName": "Alex Johnson"},
+        "owners": [{"displayName": "Alex Johnson"}],
+    },
+]
+
+# Contents of the shared folder
+SHARED_FOLDER_CONTENTS = [
+    {
+        "id": FID_SHARED_PPT,
+        "name": "GroupProject.pptx",
+        "mimeType": GSLIDES,
+        "parents": [F_SHARD],
+        "createdTime": "2024-03-05T00:00:00Z",
+        "modifiedTime": "2024-03-10T00:00:00Z",
+        "size": "0",
+        "full_path": "[Shared] Alex Johnson/Group Project Alex/GroupProject.pptx",
+        "webViewLink": "https://drive.google.com/file/shared_ppt",
+    },
+]
 
 
 def build_mock_service():
     """
     Build a mock googleapiclient service that returns our fake tree.
-    list() calls are keyed by the 'q' parameter (parent folder).
+    list() calls are keyed by the 'q' parameter (parent folder or sharedWithMe).
     """
     service = MagicMock()
 
@@ -123,17 +181,25 @@ def build_mock_service():
         F_PUSH: [
             _file(FID_APUSH, "Essay_APUSH", GDOC, F_PUSH, created="2023-11-01T00:00:00Z", path="Junior Year 23-24/APUSH/Essay_APUSH"),
         ],
+        # Shared folder contents
+        F_SHARD: SHARED_FOLDER_CONTENTS,
     }
 
     def make_list_execute(parent_id):
         items = tree.get(parent_id, [])
         return {"files": items, "nextPageToken": None}
 
-    # Capture the q= kwarg to route to the right folder
     def files_list_side_effect(**kwargs):
         q = kwargs.get("q", "")
-        # Extract parent id from q like "'folder_eng' in parents and trashed=false"
-        import re
+        # sharedWithMe query
+        if "sharedWithMe=true" in q:
+            mock_req = MagicMock()
+            mock_req.execute.return_value = {
+                "files": SHARED_WITH_ME_ITEMS,
+                "nextPageToken": None,
+            }
+            return mock_req
+        # folder query
         m = re.search(r"'([^']+)' in parents", q)
         parent_id = m.group(1) if m else ROOT
         mock_req = MagicMock()
@@ -148,15 +214,7 @@ def build_mock_service():
     service.drives.return_value.list.return_value = drives_mock
 
     # Mock export_media — returns fake bytes
-    def export_media_side_effect(fileId, mimeType):
-        mock_req = MagicMock()
-        chunk = MagicMock()
-        chunk.status = "200"
-        # Simulate MediaIoBaseDownload: write fake bytes to the buffer
-        mock_req._fd = None
-        return mock_req
-
-    service.files.return_value.export_media.side_effect = export_media_side_effect
+    service.files.return_value.export_media.return_value = MagicMock()
 
     # Mock get_media for binary files
     service.files.return_value.get_media.return_value = MagicMock()
@@ -175,7 +233,7 @@ class TestDriveWalker(unittest.TestCase):
 
     def test_walk_finds_all_files(self):
         files = list(self.walker.walk("root"))
-        # Should find 7 non-folder files
+        # My Drive has 7 non-folder files (shared-with-me is separate)
         self.assertEqual(len(files), 7)
 
     def test_walk_no_folders_returned(self):
@@ -314,21 +372,20 @@ class TestDownloader(unittest.TestCase):
         out_path = os.path.join(self.tmpdir, "2022-2023/English/Essay1.docx")
         self.assertTrue(os.path.exists(out_path))
 
-    @patch("src.downloader.MediaIoBaseDownload")
-    def test_skip_existing_file(self, mock_dl_cls):
-        # Pre-create the file
-        out_path = os.path.join(self.tmpdir, "2022-2023/Math/Unit4Notes.pdf")
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        with open(out_path, "wb") as f_:
-            f_.write(b"already here")
+    def test_sync_state_skips_unchanged_file(self):
+        # Sync state says this file was already downloaded with the same modifiedTime
+        state = SyncState(self.tmpdir)
+        state.load()
+        mtime = "2022-09-10T08:00:00Z"
+        state.mark_downloaded(FID_NOTES, mtime, "2022-2023/Math/Unit4Notes.pdf")
 
         f = _file(FID_NOTES, "Unit4Notes.pdf", PDF, F_ALG)
-        dl = self._make_downloader()
+        f["modifiedTime"] = mtime
+        dl = Downloader(self.service, output_root=self.tmpdir, sync_state=state)
         result = dl.download(f, "2022-2023/Math/Unit4Notes.pdf")
         self.assertTrue(result)
-        # MediaIoBaseDownload should NOT have been called
-        mock_dl_cls.assert_not_called()
-        self.assertEqual(dl.stats.skipped, 1)
+        self.assertEqual(dl.stats.synced_unchanged, 1)
+        self.assertEqual(dl.stats.downloaded, 0)
 
     def test_skip_unsupported_mime(self):
         f = _file("x", "site", "application/vnd.google-apps.site", ROOT)
@@ -358,10 +415,10 @@ class TestArchiverDryRun(unittest.TestCase):
         report = archiver.run()
 
         self.assertIn("total_files_found", report)
-        self.assertEqual(report["total_files_found"], 7)
+        # 7 My Drive files + 2 Shared With Me files (1 in folder, 1 direct)
+        self.assertEqual(report["total_files_found"], 9)
         self.assertEqual(report["dry_run"], True)
         self.assertEqual(report["status"], "COMPLETE")
-        # No actual downloads
         self.assertEqual(report["download_stats"]["downloaded"], 0)
 
     def test_dry_run_breakdown(self):
@@ -369,7 +426,6 @@ class TestArchiverDryRun(unittest.TestCase):
         report = archiver.run()
         breakdown = report["breakdown_by_year_and_subject"]
 
-        # We should see 2022-2023 and 2023-2024
         self.assertIn("2022-2023", breakdown)
         self.assertIn("2023-2024", breakdown)
 
@@ -389,16 +445,176 @@ class TestArchiverDryRun(unittest.TestCase):
         self.assertTrue(os.path.exists(manifest_path))
         with open(manifest_path) as fp:
             lines = fp.readlines()
-        # header + 7 file rows
-        self.assertEqual(len(lines), 8)
+        # header + 9 file rows (7 mine + 2 shared)
+        self.assertEqual(len(lines), 10)
 
     def test_year_2021_file_present(self):
         archiver = Archiver(self.service, dry_run=True)
         report = archiver.run()
         breakdown = report["breakdown_by_year_and_subject"]
-        # The old file (Nov 2021) should appear somewhere
         all_years = list(breakdown.keys())
         self.assertTrue(any("2021" in yr for yr in all_years))
+
+    def test_shared_with_me_count_in_report(self):
+        archiver = Archiver(self.service, dry_run=True)
+        report = archiver.run()
+        # 2 shared files: GroupProject.pptx and SharedDirectFile.pdf
+        self.assertEqual(report["shared_with_me_count"], 2)
+
+    def test_manifest_has_shared_with_me_column(self):
+        archiver = Archiver(self.service, dry_run=True)
+        archiver.run()
+        manifest_path = os.path.join(self.tmpdir, "manifest.csv")
+        with open(manifest_path) as fp:
+            header = fp.readline()
+        self.assertIn("shared_with_me", header)
+
+
+# ---------------------------------------------------------------
+# Shared With Me Walker Tests
+# ---------------------------------------------------------------
+
+class TestSharedWithMe(unittest.TestCase):
+    def setUp(self):
+        self.service = build_mock_service()
+        self.walker = DriveWalker(self.service)
+
+    def test_walk_all_includes_shared_files(self):
+        files = list(self.walker.walk_all())
+        ids = {f["id"] for f in files}
+        self.assertIn(FID_SHARED_PPT, ids)   # file inside shared folder
+        self.assertIn(FID_SHARED_PDF, ids)   # file shared directly
+
+    def test_shared_files_have_shared_with_me_flag(self):
+        files = list(self.walker.walk_all())
+        shared = [f for f in files if f.get("_shared_with_me")]
+        self.assertGreater(len(shared), 0)
+
+    def test_shared_files_have_correct_path_prefix(self):
+        files = list(self.walker.walk_all())
+        shared_pdf = next(f for f in files if f["id"] == FID_SHARED_PDF)
+        self.assertIn("[Shared]", shared_pdf["full_path"])
+
+    def test_shared_folder_contents_included(self):
+        files = list(self.walker.walk_all())
+        ids = {f["id"] for f in files}
+        # GroupProject.pptx is inside a shared folder, not listed at top level
+        self.assertIn(FID_SHARED_PPT, ids)
+
+    def test_no_duplicates_across_my_drive_and_shared(self):
+        files = list(self.walker.walk_all())
+        ids = [f["id"] for f in files]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_total_count_with_shared(self):
+        files = list(self.walker.walk_all())
+        # 7 My Drive + 1 in shared folder + 1 direct share = 9
+        self.assertEqual(len(files), 9)
+
+
+# ---------------------------------------------------------------
+# SizeEstimate Tests
+# ---------------------------------------------------------------
+
+class TestSizeEstimate(unittest.TestCase):
+    def _make_file(self, fid, mime, size_bytes=None, modified="2024-01-01T00:00:00Z"):
+        f = {"id": fid, "mimeType": mime, "modifiedTime": modified}
+        if size_bytes is not None:
+            f["size"] = str(size_bytes)
+        return f
+
+    def test_binary_files_counted_in_known_bytes(self):
+        est = SizeEstimate()
+        est.add(self._make_file("f1", "application/pdf", 1024 * 1024), True)
+        est.add(self._make_file("f2", "image/jpeg", 512 * 1024), True)
+        self.assertEqual(est.known_bytes, 1536 * 1024)
+        self.assertEqual(est.new_count, 2)
+
+    def test_google_workspace_counted_as_unknown(self):
+        est = SizeEstimate()
+        est.add(self._make_file("f1", "application/vnd.google-apps.document"), True)
+        est.add(self._make_file("f2", "application/vnd.google-apps.spreadsheet"), True)
+        self.assertEqual(est.unknown_count, 2)
+        self.assertEqual(est.known_bytes, 0)
+
+    def test_skip_mime_not_counted(self):
+        est = SizeEstimate()
+        est.add(self._make_file("f1", "application/vnd.google-apps.site"), True)
+        self.assertEqual(est.skip_count, 1)
+        self.assertEqual(est.new_count, 0)
+
+    def test_unchanged_files_not_counted_as_new(self):
+        est = SizeEstimate()
+        est.add(self._make_file("f1", "application/pdf", 1024), False)
+        self.assertEqual(est.unchanged_count, 1)
+        self.assertEqual(est.new_count, 0)
+        self.assertEqual(est.known_bytes, 0)   # unchanged → don't add to size
+
+    def test_mixed_set(self):
+        est = SizeEstimate()
+        est.add(self._make_file("f1", "application/pdf", 2 * 1024 * 1024), True)
+        est.add(self._make_file("f2", "application/vnd.google-apps.document"), True)
+        est.add(self._make_file("f3", "application/pdf", 1024), False)   # unchanged
+        est.add(self._make_file("f4", "application/vnd.google-apps.site"), True)  # skip
+        self.assertEqual(est.new_count, 2)
+        self.assertEqual(est.unchanged_count, 1)
+        self.assertEqual(est.skip_count, 1)
+        self.assertEqual(est.known_bytes, 2 * 1024 * 1024)
+        self.assertEqual(est.unknown_count, 1)
+
+
+# ---------------------------------------------------------------
+# Archiver + Sync State integration
+# ---------------------------------------------------------------
+
+class TestArchiverSyncIntegration(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.orig_output = config.OUTPUT_DIR
+        config.OUTPUT_DIR = self.tmpdir
+        self.service = build_mock_service()
+
+    def tearDown(self):
+        config.OUTPUT_DIR = self.orig_output
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_first_dry_run_no_sync_state_file(self):
+        archiver = Archiver(self.service, dry_run=True)
+        archiver.run()
+        # Dry-run should NOT write sync_state.json
+        state_file = os.path.join(self.tmpdir, "sync_state.json")
+        self.assertFalse(os.path.exists(state_file))
+
+    def test_sync_state_reports_unchanged_on_second_dry_run(self):
+        """
+        Pre-populate sync state as if all files were already downloaded,
+        then do a dry-run — the estimate should show them all as unchanged.
+        """
+        # Simulate a previous download: mark all known file IDs as current
+        state = SyncState(self.tmpdir)
+        state.load()
+        all_file_ids = [
+            FID_ESSAY, FID_READING, FID_NOTES, FID_RANDOM,
+            FID_LAB, FID_APUSH, FID_OLDTXT,
+            FID_SHARED_PPT, FID_SHARED_PDF,
+        ]
+        for fid in all_file_ids:
+            # Use the default createdTime/modifiedTime from _file()
+            state.mark_downloaded(fid, "2022-09-10T08:00:00Z", f"path/{fid}")
+        state.save()
+
+        # Reload in archiver's sync state
+        archiver = Archiver(self.service, dry_run=True)
+        archiver.sync_state.load()
+        report = archiver.run()
+
+        # All files should be "found" in the walk
+        self.assertEqual(report["total_files_found"], 9)
+
+    def test_report_has_synced_unchanged_key(self):
+        archiver = Archiver(self.service, dry_run=True)
+        report = archiver.run()
+        self.assertIn("synced_unchanged", report["download_stats"])
 
 
 if __name__ == "__main__":

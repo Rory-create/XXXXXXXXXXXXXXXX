@@ -4,6 +4,7 @@ Recursively walk Google Drive and yield file metadata.
 Handles:
 - My Drive (root)
 - Shared drives (Team Drives)
+- Files/folders shared directly with the user ("Shared with me")
 - Pagination (1000 files per page max)
 - Rate limiting via configurable delay
 """
@@ -53,8 +54,11 @@ class DriveWalker:
 
     def walk_all(self) -> Iterator[dict]:
         """
-        Convenience: yield ALL files in My Drive (root) and all
-        accessible shared drives, deduped by file id.
+        Yield ALL files across:
+          1. My Drive (root)
+          2. Shared/Team Drives
+          3. Files and folders shared directly with the user ("Shared with me")
+        Deduped by file id so nothing is yielded twice.
         """
         seen_ids: set[str] = set()
 
@@ -79,6 +83,13 @@ class DriveWalker:
                 logger.debug("No shared drives accessible (403) — skipping")
             else:
                 raise
+
+        # Files and folders shared directly with this user
+        logger.info("Walking 'Shared with me'...")
+        for f in self._walk_shared_with_me():
+            if f["id"] not in seen_ids:
+                seen_ids.add(f["id"])
+                yield f
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -147,3 +158,70 @@ class DriveWalker:
         """Walk a shared drive from its root folder."""
         # The root of a shared drive has the same ID as the drive itself
         yield from self._walk_folder(drive_id, parent_path=f"[Shared] {drive_name}")
+
+    def _walk_shared_with_me(self) -> Iterator[dict]:
+        """
+        Yield all items shared directly with the user via Drive's 'Shared with me' view.
+
+        Strategy:
+          - Query sharedWithMe=true to get top-level shared items.
+          - Shared files are yielded directly.
+          - Shared folders are walked recursively (their contents are accessible
+            even though they don't carry sharedWithMe=true themselves).
+        """
+        page_token = None
+        page_count = 0
+
+        while True:
+            if self.max_pages and page_count >= self.max_pages:
+                logger.warning("Hit max_pages limit during sharedWithMe walk")
+                break
+
+            try:
+                resp = (
+                    self.service.files()
+                    .list(
+                        q="sharedWithMe=true and trashed=false",
+                        fields=LIST_FIELDS,
+                        pageToken=page_token,
+                        pageSize=1000,
+                        includeItemsFromAllDrives=True,
+                        supportsAllDrives=True,
+                    )
+                    .execute()
+                )
+            except HttpError as e:
+                logger.error("HTTP error during sharedWithMe listing: %s", e)
+                break
+
+            time.sleep(config.API_DELAY_SECONDS)
+            page_count += 1
+
+            for item in resp.get("files", []):
+                # Tag the item so we can tell it came from "Shared with me"
+                # Use the sharer's name if available, otherwise generic label
+                sharer = (
+                    item.get("sharingUser", {}).get("displayName")
+                    or item.get("owners", [{}])[0].get("displayName", "")
+                    if item.get("owners")
+                    else ""
+                )
+                label = f"[Shared] {sharer}" if sharer else "[Shared With Me]"
+                item_path = f"{label}/{item['name']}"
+                item["full_path"] = item_path
+                item["_shared_with_me"] = True
+
+                if item["mimeType"] == config.GOOGLE_FOLDER_MIME:
+                    # Walk the shared folder's contents recursively.
+                    # Propagate _shared_with_me to every file inside it so the
+                    # manifest and report can distinguish them from owned files.
+                    self._folder_cache[item["id"]] = item_path
+                    for child in self._walk_folder(item["id"], item_path):
+                        child["_shared_with_me"] = True
+                        yield child
+                else:
+                    yield item
+
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break

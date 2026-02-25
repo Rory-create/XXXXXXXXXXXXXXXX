@@ -3,11 +3,12 @@
 Google Drive School Archiver — entry point.
 
 Usage:
-    python main.py [--dry-run] [--output-dir PATH]
+    python main.py [--dry-run] [--yes] [--output-dir PATH]
 
 Options:
     --dry-run       Walk Drive and categorize, but don't download anything.
                     Great for a first pass to see what's there.
+    --yes / -y      Skip the confirmation prompt and start downloading immediately.
     --output-dir    Where to save files (default: archive_output/)
     --max-files N   Stop after N files (safety cap)
     --max-mb N      Stop after N MB downloaded
@@ -44,9 +45,11 @@ def print_report(report: dict):
     print(f"Elapsed       : {report['elapsed_seconds']}s")
     print(f"Dry-run       : {report['dry_run']}")
     print(f"Files found   : {report['total_files_found']}")
+    print(f"Shared w/ me  : {report.get('shared_with_me_count', 0)} file(s)")
     dl = report["download_stats"]
     print(f"Downloaded    : {dl['downloaded']} files ({dl['total_mb']} MB)")
     print(f"Exported      : {dl['exported_google_workspace']} Google Workspace files")
+    print(f"Sync (skipped): {dl.get('synced_unchanged', 0)} unchanged files")
     print(f"Skipped       : {dl['skipped']}")
     print(f"Failed        : {dl['failed']}")
     print(f"Output dir    : {report['output_directory']}")
@@ -80,6 +83,8 @@ def main():
                         help="Max files to process")
     parser.add_argument("--max-mb", type=float, default=None,
                         help="Max total MB to download")
+    parser.add_argument("--yes", "-y", action="store_true",
+                        help="Skip confirmation prompt and download immediately")
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args()
@@ -111,7 +116,7 @@ def main():
 
     # Archive
     from src.archiver import Archiver
-    archiver = Archiver(service, dry_run=args.dry_run)
+    archiver = Archiver(service, dry_run=args.dry_run, yes=args.yes)
 
     try:
         report = archiver.run()

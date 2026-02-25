@@ -1,13 +1,19 @@
 """
 Main archival orchestrator.
 
-Ties together DriveWalker → Categorizer → Downloader.
-Tracks token/API usage, handles graceful shutdown on budget/error,
-and writes a final report.
+Ties together DriveWalker → Categorizer → Downloader → SyncState.
+
+Run phases:
+  1. Walk Drive (My Drive + Shared Drives + Shared With Me)
+  2. Categorize all files and compute size estimate
+  3. Show size report + disk space check → prompt for confirmation
+  4. Download (sync-aware: skip unchanged files)
+  5. Save sync state + write report + manifest
 """
 
 import os
 import sys
+import shutil
 import time
 import signal
 import logging
@@ -21,6 +27,7 @@ import config
 from src.drive_walker import DriveWalker
 from src.categorizer import Categorizer
 from src.downloader import Downloader
+from src.sync import SyncState
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +39,11 @@ _shutdown_requested = False
 
 def _signal_handler(sig, frame):
     global _shutdown_requested
-    logger.warning("Shutdown signal received — will finish current file then stop.")
-    _shutdown_requested = False   # set True to trigger clean exit
+    if _shutdown_requested:
+        # Second signal: force exit immediately
+        logger.warning("Force-quit requested.")
+        sys.exit(1)
+    logger.warning("Shutdown signal received — finishing current file then stopping. Ctrl-C again to force quit.")
     _shutdown_requested = True
 
 
@@ -42,33 +52,48 @@ signal.signal(signal.SIGTERM, _signal_handler)
 
 
 # -------------------------------------------------------------------
+# Helpers
+# -------------------------------------------------------------------
+
+GOOGLE_WORKSPACE_MIMES = set(config.GOOGLE_EXPORT_FORMATS.keys())
+SKIP_MIMES = {
+    "application/vnd.google-apps.site",
+    "application/vnd.google-apps.shortcut",
+    "application/vnd.google-apps.map",
+}
+
+
+def _fmt_bytes(n: int) -> str:
+    """Human-readable byte size."""
+    if n >= 1 << 30:
+        return f"{n / (1 << 30):.2f} GB"
+    if n >= 1 << 20:
+        return f"{n / (1 << 20):.1f} MB"
+    return f"{n / 1024:.1f} KB"
+
+
+def _get_free_space(path: str) -> int:
+    """Return free bytes on the filesystem containing path."""
+    os.makedirs(path, exist_ok=True)
+    return shutil.disk_usage(path).free
+
 
 class LoopGuard:
-    """
-    Detects potential infinite loops / runaway API usage and signals abort.
-    Aborts if:
-      - More than MAX_FILES files queued
-      - More than MAX_API_CALLS API pages fetched
-      - Identical file IDs seen more than once (dedup guard)
-    """
-
-    def __init__(self, max_files: Optional[int] = config.MAX_FILES):
-        self.max_files = max_files
+    def __init__(self, max_files: Optional[int] = None):
+        self.max_files = max_files or config.MAX_FILES
         self.file_count = 0
         self.seen_ids: set[str] = set()
         self.duplicates = 0
 
     def check_file(self, file_id: str) -> bool:
-        """Returns False if we should stop (budget hit or dupe loop)."""
         if file_id in self.seen_ids:
             self.duplicates += 1
             if self.duplicates > 50:
                 logger.error("LoopGuard: >50 duplicate file IDs — likely infinite loop. Aborting.")
                 return False
-            return True   # Allow a few dupes (shared-drive overlap)
+            return True
         self.seen_ids.add(file_id)
         self.file_count += 1
-
         if self.max_files and self.file_count > self.max_files:
             logger.warning("LoopGuard: MAX_FILES=%d reached — stopping.", self.max_files)
             return False
@@ -77,23 +102,84 @@ class LoopGuard:
 
 # -------------------------------------------------------------------
 
+class SizeEstimate:
+    """
+    Summarises expected download size from Drive file metadata.
+    Google Workspace files don't have a size in Drive metadata (they're
+    stored server-side), so we report them separately as 'size unknown'.
+    """
+    def __init__(self):
+        self.known_bytes: int = 0         # sum of size fields for binary files
+        self.unknown_count: int = 0       # Google Workspace files (no size in metadata)
+        self.skip_count: int = 0          # unsupported types that will be skipped
+        self.new_count: int = 0           # files that need downloading (new or changed)
+        self.unchanged_count: int = 0     # files sync will skip
+
+    def add(self, file_meta: dict, needs_download: bool) -> None:
+        mime = file_meta.get("mimeType", "")
+        if mime in SKIP_MIMES:
+            self.skip_count += 1
+            return
+
+        if not needs_download:
+            self.unchanged_count += 1
+            return
+
+        self.new_count += 1
+        if mime in GOOGLE_WORKSPACE_MIMES:
+            self.unknown_count += 1
+        else:
+            try:
+                self.known_bytes += int(file_meta.get("size") or 0)
+            except (ValueError, TypeError):
+                self.unknown_count += 1
+
+    def print_summary(self, free_bytes: int) -> None:
+        print()
+        print("┌─────────────────────────────────────────────────────┐")
+        print("│              PRE-DOWNLOAD SIZE ESTIMATE              │")
+        print("├─────────────────────────────────────────────────────┤")
+        print(f"│  Files to download (new/changed):  {self.new_count:<18}│")
+        print(f"│  Already up-to-date (sync skip):   {self.unchanged_count:<18}│")
+        print(f"│  Unsupported types (will skip):    {self.skip_count:<18}│")
+        print("├─────────────────────────────────────────────────────┤")
+        known_str = _fmt_bytes(self.known_bytes)
+        print(f"│  Known download size:              {known_str:<18}│")
+        if self.unknown_count:
+            unk_str = f"{self.unknown_count} Google file(s)"
+            print(f"│  + Google Workspace exports:       {unk_str:<18}│")
+            print(f"│    (Docs/Sheets/Slides — size unknown            │")
+            print(f"│     until exported, typically small)             │")
+        print("├─────────────────────────────────────────────────────┤")
+        free_str = _fmt_bytes(free_bytes)
+        print(f"│  Free disk space:                  {free_str:<18}│")
+        if self.known_bytes > free_bytes:
+            print("│  !! WARNING: Known size exceeds free space!         │")
+        elif self.known_bytes > free_bytes * 0.9:
+            print("│  !! NOTE: Will use >90% of your free disk space.    │")
+        else:
+            print("│  OK: Looks like you have enough space.              │")
+        print("└─────────────────────────────────────────────────────┘")
+        print()
+
+
+# -------------------------------------------------------------------
+
 class Archiver:
-    def __init__(self, service, dry_run: bool = False):
+    def __init__(self, service, dry_run: bool = False, yes: bool = False):
         self.service = service
         self.dry_run = dry_run
+        self.yes = yes   # skip confirmation prompt
         self.walker = DriveWalker(service)
         self.categorizer = Categorizer()
-        self.downloader = Downloader(service, config.OUTPUT_DIR)
+        self.sync_state = SyncState(config.OUTPUT_DIR)
+        self.downloader = Downloader(service, config.OUTPUT_DIR, self.sync_state)
         self.loop_guard = LoopGuard()
         self.start_time = datetime.now(timezone.utc)
         self.files_processed: list[dict] = []
         self.errors: list[str] = []
 
     def run(self) -> dict:
-        """
-        Main entry point.
-        Returns a report dict.
-        """
         global _shutdown_requested
 
         logger.info("=" * 60)
@@ -103,8 +189,21 @@ class Archiver:
 
         os.makedirs(config.OUTPUT_DIR, exist_ok=True)
 
-        # --- Collect all files first (with progress) ---
-        logger.info("Phase 1: Walking Google Drive (this may take a while)...")
+        # Load sync state from previous run (if any)
+        self.sync_state.load()
+        prior_count = self.sync_state.total_recorded
+        if prior_count:
+            logger.info(
+                "Sync: %d files from previous run recorded — "
+                "unchanged files will be skipped",
+                prior_count,
+            )
+
+        # ── Phase 1: Walk ──────────────────────────────────────────
+        logger.info(
+            "Phase 1: Walking Google Drive "
+            "(My Drive + Shared Drives + Shared With Me)..."
+        )
         all_files = []
         try:
             for file_meta in self.walker.walk_all():
@@ -119,14 +218,48 @@ class Archiver:
             logger.error("Error during Drive walk: %s", e, exc_info=True)
             self.errors.append(f"Walk error: {e}")
 
-        total = len(all_files)
-        logger.info("Phase 1 complete: %d files found", total)
+        logger.info("Phase 1 complete: %d files found", len(all_files))
 
-        # --- Download phase ---
-        logger.info("Phase 2: Categorizing and downloading %d files...", total)
-        bar = tqdm(all_files, desc="Archiving", unit="file", disable=not sys.stdout.isatty())
+        # ── Phase 2: Categorize + Size Estimate ───────────────────
+        logger.info("Phase 2: Categorizing and estimating download size...")
+        estimate = SizeEstimate()
+        categorized: list[tuple[dict, object]] = []
 
-        for file_meta in bar:
+        for file_meta in all_files:
+            try:
+                category = self.categorizer.categorize(file_meta)
+                needs_dl = self.sync_state.needs_download(
+                    file_meta["id"], file_meta.get("modifiedTime")
+                )
+                estimate.add(file_meta, needs_dl)
+                categorized.append((file_meta, category))
+            except Exception as e:
+                msg = f"Categorize error for '{file_meta.get('name', '?')}': {e}"
+                logger.error(msg)
+                self.errors.append(msg)
+
+        # ── Phase 3: Size check + confirmation ────────────────────
+        if not self.dry_run:
+            free_bytes = _get_free_space(config.OUTPUT_DIR)
+            estimate.print_summary(free_bytes)
+
+            if not self.yes:
+                confirmed = _prompt_confirmation(estimate)
+                if not confirmed:
+                    logger.info("Download cancelled by user.")
+                    return self._build_report(aborted=True)
+
+        # ── Phase 4: Download ──────────────────────────────────────
+        action = "Dry-run scan" if self.dry_run else "Downloading"
+        logger.info("Phase 4: %s — %d files...", action, len(categorized))
+        bar = tqdm(
+            categorized,
+            desc="Archiving",
+            unit="file",
+            disable=not sys.stdout.isatty(),
+        )
+
+        for file_meta, category in bar:
             if _shutdown_requested:
                 logger.warning("Shutdown requested — stopping download phase.")
                 break
@@ -135,7 +268,6 @@ class Archiver:
             bar.set_description(f"Archiving: {name[:40]}")
 
             try:
-                category = self.categorizer.categorize(file_meta)
                 record = {
                     "id": file_meta["id"],
                     "name": name,
@@ -146,6 +278,7 @@ class Archiver:
                     "created": file_meta.get("createdTime", ""),
                     "modified": file_meta.get("modifiedTime", ""),
                     "drive_path": file_meta.get("full_path", ""),
+                    "shared_with_me": file_meta.get("_shared_with_me", False),
                 }
 
                 if not self.dry_run:
@@ -158,6 +291,11 @@ class Archiver:
                 logger.error(msg, exc_info=True)
                 self.errors.append(msg)
 
+        # ── Phase 5: Persist sync state ────────────────────────────
+        if not self.dry_run:
+            self.sync_state.save()
+            logger.info("Sync state saved.")
+
         return self._build_report(aborted=_shutdown_requested)
 
     # ------------------------------------------------------------------
@@ -166,13 +304,15 @@ class Archiver:
         elapsed = (datetime.now(timezone.utc) - self.start_time).total_seconds()
         dl = self.downloader.stats
 
-        # Build year/subject breakdown
         breakdown: dict[str, dict[str, int]] = {}
+        shared_count = 0
         for rec in self.files_processed:
             yr = rec["school_year"]
             subj = rec["subject"]
             breakdown.setdefault(yr, {})
             breakdown[yr][subj] = breakdown[yr].get(subj, 0) + 1
+            if rec.get("shared_with_me"):
+                shared_count += 1
 
         report = {
             "run_timestamp": self.start_time.isoformat(),
@@ -180,9 +320,11 @@ class Archiver:
             "status": "ABORTED" if aborted else "COMPLETE",
             "dry_run": self.dry_run,
             "total_files_found": len(self.files_processed),
+            "shared_with_me_count": shared_count,
             "download_stats": {
                 "downloaded": dl.downloaded,
                 "exported_google_workspace": dl.exported,
+                "synced_unchanged": dl.synced_unchanged,
                 "skipped": dl.skipped,
                 "failed": dl.failed,
                 "total_mb": round(dl.bytes_downloaded / (1024 * 1024), 2),
@@ -192,7 +334,6 @@ class Archiver:
             "output_directory": os.path.abspath(config.OUTPUT_DIR),
         }
 
-        # Write JSON report
         report_path = os.path.join(config.OUTPUT_DIR, "archive_report.json")
         try:
             with open(report_path, "w") as f:
@@ -201,7 +342,6 @@ class Archiver:
         except Exception as e:
             logger.error("Could not write report: %s", e)
 
-        # Write manifest CSV
         manifest_path = os.path.join(config.OUTPUT_DIR, "manifest.csv")
         try:
             _write_manifest(self.files_processed, manifest_path)
@@ -210,6 +350,26 @@ class Archiver:
             logger.error("Could not write manifest: %s", e)
 
         return report
+
+
+# -------------------------------------------------------------------
+
+def _prompt_confirmation(estimate: SizeEstimate) -> bool:
+    """Ask the user if they want to proceed with the download."""
+    if estimate.new_count == 0:
+        print("Nothing new to download — all files are already up to date!\n")
+        return False
+
+    while True:
+        try:
+            ans = input("Proceed with download? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        if ans in ("y", "yes"):
+            return True
+        if ans in ("n", "no", ""):
+            return False
+        print("Please enter y or n.")
 
 
 def _write_manifest(records: list[dict], path: str):
