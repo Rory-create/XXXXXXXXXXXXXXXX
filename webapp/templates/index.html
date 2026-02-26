@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>School Drive Archiver</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-indigo-50 to-violet-50 flex items-center justify-center p-4">
+
+  <div class="w-full max-w-lg">
+
+    <!-- Header -->
+    <div class="text-center mb-8">
+      <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-600 mb-4 shadow-lg">
+        <svg class="w-9 h-9 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z"/>
+        </svg>
+      </div>
+      <h1 class="text-3xl font-bold text-gray-900">School Drive Archiver</h1>
+      <p class="text-gray-500 mt-2">Back up and organize your school Google Drive — sorted by year and subject.</p>
+    </div>
+
+    <!-- Card -->
+    <div class="bg-white rounded-2xl shadow-xl p-8">
+
+      {% if error %}
+      <div class="mb-6 flex items-start gap-3 rounded-lg bg-red-50 border border-red-200 px-4 py-3">
+        <svg class="w-5 h-5 text-red-500 mt-0.5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+          <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+        </svg>
+        <p class="text-sm text-red-700">{{ error }}</p>
+      </div>
+      {% endif %}
+
+      <form method="POST" action="/auth/start">
+
+        <!-- Step 1: Access code -->
+        <div class="mb-6">
+          <label class="block text-sm font-semibold text-gray-700 mb-2">
+            Step 1 — Enter your access code
+          </label>
+          <input
+            type="text"
+            name="access_code"
+            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+            required
+            autocomplete="off"
+            class="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-mono
+                   focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent
+                   placeholder-gray-300"
+          >
+          <p class="mt-1.5 text-xs text-gray-400">
+            Pay $3 via Venmo/CashApp and you'll receive your code.
+          </p>
+        </div>
+
+        <!-- Step 2: Destination -->
+        <div class="mb-7">
+          <label class="block text-sm font-semibold text-gray-700 mb-3">
+            Step 2 — Where should we save your archive?
+          </label>
+          <div class="grid grid-cols-1 gap-3">
+
+            <!-- Google Drive option -->
+            <label class="relative flex items-start gap-4 cursor-pointer rounded-xl border-2 border-indigo-500 bg-indigo-50 p-4 has-[:checked]:border-indigo-600">
+              <input type="radio" name="destination" value="drive" checked class="sr-only peer">
+              <div class="flex items-center justify-center w-10 h-10 rounded-lg bg-white shadow-sm shrink-0">
+                <!-- Google Drive icon approximation -->
+                <svg class="w-6 h-6" viewBox="0 0 87.3 78" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M6.6 66.85l3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3L29 48H0c0 1.55.4 3.1 1.2 4.5z" fill="#0066DA"/>
+                  <path d="M43.65 25L28.35 0c-1.35.8-2.5 1.9-3.3 3.3L1.2 43.5C.4 44.9 0 46.45 0 48h29z" fill="#00AC47"/>
+                  <path d="M73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75 7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5H58.3l6.35 11.7z" fill="#EA4335"/>
+                  <path d="M43.65 25L58.95 0H28.35z" fill="#00832D"/>
+                  <path d="M87.3 48H58.3L43.65 25 28.35 48 58.3 48z" fill="#2684FC"/>
+                  <path d="M73.55 76.8L58.3 48H29l14.65 28.8 9.2-1 10.7-4z" fill="#FFBA00"/>
+                </svg>
+              </div>
+              <div class="flex-1 min-w-0">
+                <p class="font-semibold text-gray-900 text-sm">Save to my Google Drive</p>
+                <p class="text-xs text-gray-500 mt-0.5">Creates an organized folder in your Drive — no download or disk space needed. Best for Chromebooks.</p>
+              </div>
+              <svg class="w-5 h-5 text-indigo-600 shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+              </svg>
+            </label>
+
+            <!-- ZIP option -->
+            <label class="relative flex items-start gap-4 cursor-pointer rounded-xl border-2 border-gray-200 p-4 hover:border-gray-300 transition-colors">
+              <input type="radio" name="destination" value="zip" class="sr-only peer">
+              <div class="flex items-center justify-center w-10 h-10 rounded-lg bg-gray-100 shrink-0">
+                <svg class="w-6 h-6 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                </svg>
+              </div>
+              <div class="flex-1 min-w-0">
+                <p class="font-semibold text-gray-900 text-sm">Download as ZIP file</p>
+                <p class="text-xs text-gray-500 mt-0.5">Downloads a ZIP to this device. Best for Mac, Windows, or phone — needs free disk space.</p>
+              </div>
+            </label>
+
+          </div>
+        </div>
+
+        <!-- Submit -->
+        <button
+          type="submit"
+          class="w-full flex items-center justify-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700
+                 active:bg-indigo-800 text-white font-semibold py-3 px-4 transition-colors shadow-md"
+        >
+          <svg class="w-5 h-5" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M44 20H24v8h11.304C33.59 32.657 29.28 36 24 36c-6.627 0-12-5.373-12-12s5.373-12 12-12c3.058 0 5.845 1.145 7.961 3.019L37.522 9.46C33.911 6.148 29.196 4 24 4 12.954 4 4 12.954 4 24s8.954 20 20 20c11.046 0 20-8.954 20-20 0-1.341-.138-2.65-.38-3.917z" fill="white"/>
+          </svg>
+          Continue with Google
+        </button>
+
+      </form>
+    </div>
+
+    <!-- Privacy note -->
+    <p class="text-center text-xs text-gray-400 mt-6 leading-relaxed">
+      We only access your Google Drive while your session is active. Files are never stored permanently on our servers.
+    </p>
+
+  </div>
+
+  <!-- Radio card highlight JS (vanilla, no framework) -->
+  <script>
+    document.querySelectorAll('input[name="destination"]').forEach(radio => {
+      radio.addEventListener('change', () => {
+        document.querySelectorAll('input[name="destination"]').forEach(r => {
+          const card = r.closest('label');
+          if (r.checked) {
+            card.classList.add('border-indigo-500', 'bg-indigo-50');
+            card.classList.remove('border-gray-200');
+          } else {
+            card.classList.remove('border-indigo-500', 'bg-indigo-50');
+            card.classList.add('border-gray-200');
+          }
+        });
+      });
+    });
+  </script>
+
+</body>
+</html>

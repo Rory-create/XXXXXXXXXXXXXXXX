@@ -16,3 +16,9 @@ dist/
 build/
 .venv/
 venv/
+
+# Web app — secrets and runtime state
+.env
+codes.json
+flask_session/
+tmp/

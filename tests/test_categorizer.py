@@ -193,6 +193,20 @@ class TestCategorizerIntegration(unittest.TestCase):
         result = self.cat.categorize(f)
         self.assertEqual(result.school_year, "Unknown Year")
 
+    def test_preserves_existing_folder_structure(self):
+        """Files already inside a folder keep their Drive path exactly."""
+        f = self._make_file("Essay.docx", "English/Semester 1/Essay.docx")
+        result = self.cat.categorize(f)
+        self.assertEqual(result.full_path, "English/Semester 1/Essay.docx")
+
+    def test_auto_categorizes_root_floater(self):
+        """Files at the root of Drive (no folder) get auto-categorized into year/subject."""
+        f = self._make_file("Random Notes.docx", created="2023-09-15T10:00:00Z")
+        result = self.cat.categorize(f)
+        # Should be placed inside a year/subject tree, not left at root
+        self.assertIn("/", result.full_path)
+        self.assertTrue(result.full_path.startswith("2023-2024/"))
+
 
 class TestSanitize(unittest.TestCase):
     def test_removes_slash(self):

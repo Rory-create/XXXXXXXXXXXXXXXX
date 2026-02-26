@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Error — School Drive Archiver</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-indigo-50 to-violet-50 flex items-center justify-center p-4">
+
+  <div class="w-full max-w-md text-center">
+
+    <!-- Error icon -->
+    <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-red-500 mb-6 shadow-lg">
+      <svg class="w-9 h-9 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5"
+          d="M6 18L18 6M6 6l12 12"/>
+      </svg>
+    </div>
+
+    <h1 class="text-2xl font-bold text-gray-900 mb-2">Something went wrong</h1>
+
+    {% if message %}
+    <p class="text-gray-500 text-sm mb-8 font-mono bg-gray-100 rounded-lg px-4 py-3 text-left break-all">
+      {{ message }}
+    </p>
+    {% else %}
+    <p class="text-gray-500 text-sm mb-8">An unexpected error occurred.</p>
+    {% endif %}
+
+    <a
+      href="/"
+      class="inline-flex items-center justify-center gap-2 w-full rounded-xl bg-indigo-600 hover:bg-indigo-700
+             active:bg-indigo-800 text-white font-semibold py-3 px-4 transition-colors shadow-md"
+    >
+      Start over
+    </a>
+
+  </div>
+
+</body>
+</html>

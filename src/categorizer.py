@@ -110,6 +110,10 @@ class Categorizer:
           1. Folder path keywords
           2. File name keywords
           3. Fallback: "Misc"
+
+        Output path:
+          - Files already inside a folder: preserve their existing Drive path exactly.
+          - Files floating at the root of Drive: auto-categorize into year/subject/.
         """
         name = file_meta.get("name", "")
         full_path = file_meta.get("full_path", name)
@@ -129,8 +133,16 @@ class Categorizer:
         )
 
         # --- Build output relative path ---
-        safe_name = _sanitize(name)
-        out_path = f"{school_year}/{subject}/{safe_name}"
+        # A file with more than one path component is already inside a folder.
+        # Preserve that structure; only sanitize the filename component.
+        # A file with a single-component path is floating at root — auto-categorize.
+        path_parts = [p for p in full_path.replace("\\", "/").split("/") if p]
+        if len(path_parts) > 1:
+            safe_name = _sanitize(path_parts[-1])
+            out_path = "/".join(path_parts[:-1]) + "/" + safe_name
+        else:
+            safe_name = _sanitize(name)
+            out_path = f"{school_year}/{subject}/{safe_name}"
 
         return FileCategory(school_year=school_year, subject=subject, full_path=out_path)
 
